@@ -28,14 +28,8 @@ import sbt._
 import sbt.Classpaths.publishTask
 import sbt.Keys._
 import sbtunidoc.Plugin.UnidocKeys.unidocGenjavadocVersion
-import com.etsy.sbt.checkstyle.CheckstylePlugin.autoImport._
 import com.simplytyped.Antlr4Plugin._
 import com.typesafe.sbt.pom.{PomBuild, SbtPomKeys}
-import com.typesafe.tools.mima.plugin.MimaKeys
-import org.scalastyle.sbt.ScalastylePlugin.autoImport._
-import org.scalastyle.sbt.Tasks
-
-import spray.revolver.RevolverPlugin._
 
 object BuildCommons {
 
@@ -130,88 +124,13 @@ object SparkBuild extends PomBuild {
     )
   )
 
-  lazy val scalaStyleRules = Project("scalaStyleRules", file("scalastyle"))
-    .settings(
-      libraryDependencies += "org.scalastyle" %% "scalastyle" % "1.0.0"
-    )
-
-  lazy val scalaStyleOnCompile = taskKey[Unit]("scalaStyleOnCompile")
-
-  lazy val scalaStyleOnTest = taskKey[Unit]("scalaStyleOnTest")
-
-  // We special case the 'println' lint rule to only be a warning on compile, because adding
-  // printlns for debugging is a common use case and is easy to remember to remove.
-  val scalaStyleOnCompileConfig: String = {
-    val in = "scalastyle-config.xml"
-    val out = "scalastyle-on-compile.generated.xml"
-    val replacements = Map(
-      """customId="println" level="error"""" -> """customId="println" level="warn""""
-    )
-    var contents = Source.fromFile(in).getLines.mkString("\n")
-    for ((k, v) <- replacements) {
-      require(contents.contains(k), s"Could not rewrite '$k' in original scalastyle config.")
-      contents = contents.replace(k, v)
-    }
-    new PrintWriter(out) {
-      write(contents)
-      close()
-    }
-    out
-  }
-
-  // Return a cached scalastyle task for a given configuration (usually Compile or Test)
-  private def cachedScalaStyle(config: Configuration) = Def.task {
-    val logger = streams.value.log
-    // We need a different cache dir per Configuration, otherwise they collide
-    val cacheDir = target.value / s"scalastyle-cache-${config.name}"
-    val cachedFun = FileFunction.cached(cacheDir, FilesInfo.lastModified, FilesInfo.exists) {
-      (inFiles: Set[File]) => {
-        val args: Seq[String] = Seq.empty
-        val scalaSourceV = Seq(file(scalaSource.in(config).value.getAbsolutePath))
-        val configV = (baseDirectory in ThisBuild).value / scalaStyleOnCompileConfig
-        val configUrlV = scalastyleConfigUrl.in(config).value
-        val streamsV = streams.in(config).value
-        val failOnErrorV = true
-        val failOnWarningV = false
-        val scalastyleTargetV = scalastyleTarget.in(config).value
-        val configRefreshHoursV = scalastyleConfigRefreshHours.in(config).value
-        val targetV = target.in(config).value
-        val configCacheFileV = scalastyleConfigUrlCacheFile.in(config).value
-
-        logger.info(s"Running scalastyle on ${name.value} in ${config.name}")
-        Tasks.doScalastyle(args, configV, configUrlV, failOnErrorV, failOnWarningV, scalaSourceV,
-          scalastyleTargetV, streamsV, configRefreshHoursV, targetV, configCacheFileV)
-
-        Set.empty
-      }
-    }
-
-    cachedFun(findFiles(scalaSource.in(config).value))
-  }
-
   private def findFiles(file: File): Set[File] = if (file.isDirectory) {
     file.listFiles().toSet.flatMap(findFiles) + file
   } else {
     Set(file)
   }
 
-  def enableScalaStyle: Seq[sbt.Def.Setting[_]] = Seq(
-    scalaStyleOnCompile := cachedScalaStyle(Compile).value,
-    scalaStyleOnTest := cachedScalaStyle(Test).value,
-    logLevel in scalaStyleOnCompile := Level.Warn,
-    logLevel in scalaStyleOnTest := Level.Warn,
-    (compile in Compile) := {
-      scalaStyleOnCompile.value
-      (compile in Compile).value
-    },
-    (compile in Test) := {
-      scalaStyleOnTest.value
-      (compile in Test).value
-    }
-  )
-
-  lazy val sharedSettings = sparkGenjavadocSettings ++
-      (if (sys.env.contains("NOLINT_ON_COMPILE")) Nil else enableScalaStyle) ++ Seq(
+  lazy val sharedSettings = sparkGenjavadocSettings ++ Seq(
     exportJars in Compile := true,
     exportJars in Test := false,
     javaHome := sys.env.get("JAVA_HOME")
@@ -316,21 +235,10 @@ object SparkBuild extends PomBuild {
   /* Enable shared settings on all projects */
   (allProjects ++ optionallyEnabledProjects ++ assemblyProjects ++ copyJarsProjects ++ Seq(spark, tools))
     .foreach(enable(sharedSettings ++ DependencyOverrides.settings ++
-      ExcludedDependencies.settings ++ Checkstyle.settings))
+      ExcludedDependencies.settings))
 
   /* Enable tests settings for all projects except examples, assembly and tools */
   (allProjects ++ optionallyEnabledProjects).foreach(enable(TestSettings.settings))
-
-  val mimaProjects = allProjects.filterNot { x =>
-    Seq(
-      spark, hive, hiveThriftServer, catalyst, repl, networkCommon, networkShuffle, networkYarn,
-      unsafe, tags, tokenProviderKafka010, sqlKafka010, kvstore, avro
-    ).contains(x)
-  }
-
-  mimaProjects.foreach { x =>
-    enable(MimaBuild.mimaSettings(sparkHome, x))(x)
-  }
 
   /* Generate and pick the spark build info from extra-resources */
   enable(Core.settings)(core)
@@ -414,14 +322,6 @@ object SparkBuild extends PomBuild {
   ))(assembly)
 
   enable(Seq(sparkShell := sparkShell in LocalProject("assembly")))(spark)
-
-  // TODO: move this to its upstream project.
-  override def projectDefinitions(baseDirectory: File): Seq[Project] = {
-    super.projectDefinitions(baseDirectory).map { x =>
-      if (projectsMap.exists(_._1 == x.id)) x.settings(projectsMap(x.id): _*)
-      else x.settings(Seq[Setting[_]](): _*)
-    } ++ Seq[Project](OldDeps.project)
-  }
 
   if (!sys.env.contains("SERIAL_SBT_TESTS")) {
     allProjects.foreach(enable(SparkParallelTestGrouping.settings))
@@ -617,26 +517,6 @@ object ExcludedDependencies {
   )
 }
 
-/**
- * Project to pull previous artifacts of Spark for generating Mima excludes.
- */
-object OldDeps {
-
-  lazy val project = Project("oldDeps", file("dev"), settings = oldDepsSettings)
-
-  lazy val allPreviousArtifactKeys = Def.settingDyn[Seq[Set[ModuleID]]] {
-    SparkBuild.mimaProjects
-      .map { project => MimaKeys.mimaPreviousArtifacts in project }
-      .map(k => Def.setting(k.value))
-      .join
-  }
-
-  def oldDepsSettings() = Defaults.coreDefaultSettings ++ Seq(
-    name := "old-deps",
-    libraryDependencies := allPreviousArtifactKeys.value.flatten
-  )
-}
-
 object Catalyst {
   lazy val settings = antlr4Settings ++ Seq(
     antlr4Version in Antlr4 := SbtPomKeys.effectivePom.value.getProperties.get("antlr4.version").asInstanceOf[String],
@@ -829,10 +709,10 @@ object Unidoc {
     publish := {},
 
     unidocProjectFilter in(ScalaUnidoc, unidoc) :=
-      inAnyProject -- inProjects(OldDeps.project, repl, examples, tools, kubernetes,
+      inAnyProject -- inProjects(repl, examples, tools, kubernetes,
         yarn, tags, streamingKafka010, sqlKafka010, avro),
     unidocProjectFilter in(JavaUnidoc, unidoc) :=
-      inAnyProject -- inProjects(OldDeps.project, repl, examples, tools, kubernetes,
+      inAnyProject -- inProjects(repl, examples, tools, kubernetes,
         yarn, tags, streamingKafka010, sqlKafka010, avro),
 
     unidocAllClasspaths in (ScalaUnidoc, unidoc) := {
@@ -883,17 +763,6 @@ object Unidoc {
         Seq()
       }
     )
-  )
-}
-
-object Checkstyle {
-  lazy val settings = Seq(
-    checkstyleSeverityLevel := Some(CheckstyleSeverityLevel.Error),
-    javaSource in (Compile, checkstyle) := baseDirectory.value / "src/main/java",
-    javaSource in (Test, checkstyle) := baseDirectory.value / "src/test/java",
-    checkstyleConfigLocation := CheckstyleConfigLocation.File("dev/checkstyle.xml"),
-    checkstyleOutputFile := baseDirectory.value / "target/checkstyle-output.xml",
-    checkstyleOutputFile in Test := baseDirectory.value / "target/checkstyle-output.xml"
   )
 }
 
